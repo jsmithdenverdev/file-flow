@@ -1,0 +1,11 @@
+{
+  "name": "@file-flow/web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FileFlow web frontend",
+  "scripts": {
+    "dev": "echo 'Frontend not yet implemented'",
+    "build": "echo 'Frontend not yet implemented'",
+    "preview": "echo 'Frontend not yet implemented'"
+  }
+}

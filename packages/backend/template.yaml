@@ -1,0 +1,648 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: FileFlow - Serverless file processing platform
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - Environment
+    ParameterLabels:
+      Environment:
+        default: "Deployment Environment"
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name for deployment
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    MemorySize: 1024
+    Timeout: 30
+    Tracing: Active
+    ReservedConcurrentExecutions: 10
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        LOG_LEVEL: !If [IsProduction, INFO, DEBUG]
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+        POWERTOOLS_SERVICE_NAME: fileflow
+        POWERTOOLS_METRICS_NAMESPACE: FileFlow
+        NODE_OPTIONS: "--enable-source-maps"
+    Tags:
+      Project: FileFlow
+      Environment: !Ref Environment
+      ManagedBy: SAM
+      CostCenter: Engineering
+  Api:
+    TracingEnabled: true
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, prod]
+  IsNotDev: !Not [!Equals [!Ref Environment, dev]]
+
+Resources:
+  # S3 Bucket for file storage
+  FileStorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-files-${Environment}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 60
+          - Id: DeleteIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - '*'
+            AllowedMethods:
+              - PUT
+              - POST
+              - GET
+            AllowedHeaders:
+              - '*'
+            MaxAge: 3600
+      # S3 notification will be configured after Lambda creation
+      #NotificationConfiguration:
+      #  LambdaConfigurations:
+      #    - Event: s3:ObjectCreated:*
+      #      Filter:
+      #        S3Key:
+      #          Rules:
+      #            - Name: prefix
+      #              Value: uploads/
+      #      Function: !GetAtt OrchestratorFunction.Arn
+
+  # S3 Bucket Policy
+  FileStorageBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FileStorageBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt FileStorageBucket.Arn
+              - !Sub '${FileStorageBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+  # API Gateway
+  FileProcessingApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}-api'
+      StageName: !Ref Environment
+      TracingEnabled: true
+      Cors:
+        AllowMethods: "'OPTIONS,POST,GET'"
+        AllowHeaders: "'Content-Type,X-Api-Key,Authorization'"
+        AllowOrigin: "'*'"
+      Auth:
+        ApiKeyRequired: !If [IsNotDev, true, false]
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          ThrottlingRateLimit: 100
+          ThrottlingBurstLimit: 200
+          LoggingLevel: !If [IsProduction, ERROR, INFO]
+          DataTraceEnabled: !If [IsProduction, false, true]
+          MetricsEnabled: true
+      Tags:
+        Project: FileFlow
+        Environment: !Ref Environment
+        ManagedBy: SAM
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub '${FileStorageBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt FileStorageBucket.Arn
+
+  # Dead Letter Queue for Orchestrator
+  OrchestratorDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-orchestrator-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeout: 300
+
+  # Step Functions Execution Role
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ResizeFunction.Arn
+                  - !GetAtt ExposureFunction.Arn
+                  - !GetAtt ValidatorFunction.Arn
+        - PolicyName: XRayAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+
+  # Presigned URL Lambda Function
+  PresignedUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-presigned-url'
+      CodeUri: ./dist
+      Handler: presigned-url.lambdaHandler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: 256  # Reduced - this function does minimal processing
+      ReservedConcurrentExecutions: 50  # Higher for API endpoint
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref FileStorageBucket
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref FileProcessingApi
+            Path: /upload/presign
+            Method: POST
+
+  # Orchestrator Lambda Function
+  OrchestratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-orchestrator'
+      CodeUri: ./dist
+      Handler: orchestrator.lambdaHandler
+      Role: !GetAtt OrchestratorRole.Arn
+      MemorySize: 256  # Reduced - this function just triggers Step Functions
+      ReservedConcurrentExecutions: 20
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt OrchestratorDLQ.Arn
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref ProcessingStateMachine
+
+  # Orchestrator Lambda Role (needs Step Functions permissions)
+  OrchestratorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: StepFunctionsExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref ProcessingStateMachine
+        - PolicyName: DLQAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt OrchestratorDLQ.Arn
+
+  # S3 Permission for Orchestrator Lambda
+  OrchestratorS3Permission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt OrchestratorFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !GetAtt FileStorageBucket.Arn
+
+  # S3 Bucket Notification Configuration (separate resource to avoid circular dependency)
+  BucketNotificationConfiguration:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - OrchestratorS3Permission
+    Properties:
+      ServiceToken: !GetAtt S3NotificationFunction.Arn
+      BucketName: !Ref FileStorageBucket
+      LambdaFunctionArn: !GetAtt OrchestratorFunction.Arn
+
+  # Custom resource Lambda for S3 notifications
+  S3NotificationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-s3-notification-config'
+      CodeUri: ./dist
+      Handler: s3-notification-config.lambdaHandler
+      Runtime: nodejs20.x
+      MemorySize: 256
+      Timeout: 60
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetBucketNotification
+                - s3:PutBucketNotification
+              Resource: !GetAtt FileStorageBucket.Arn
+
+  # Validator Lambda Function
+  ValidatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-validator'
+      CodeUri: ./dist
+      Handler: validator.lambdaHandler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: 256  # Reduced - validation is lightweight
+      ReservedConcurrentExecutions: 10
+
+  # Resize Lambda Function
+  ResizeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-resize'
+      CodeUri: ./dist
+      Handler: resize.lambdaHandler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: 3008  # Increased for 4K image processing
+      Timeout: 90  # Increased for large images
+      ReservedConcurrentExecutions: 5  # Limit concurrent heavy processing
+      EphemeralStorage:
+        Size: 1024  # 1GB ephemeral storage for image processing
+      Layers:
+        - !Ref SharpLayer
+
+  # Exposure Lambda Function
+  ExposureFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-exposure'
+      CodeUri: ./dist
+      Handler: exposure.lambdaHandler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: 3008  # Increased for 4K image processing
+      Timeout: 90  # Increased for large images
+      ReservedConcurrentExecutions: 5  # Limit concurrent heavy processing
+      EphemeralStorage:
+        Size: 1024  # 1GB ephemeral storage for image processing
+      Layers:
+        - !Ref SharpLayer
+
+  # Lambda Layer for Sharp
+  SharpLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub '${AWS::StackName}-sharp-layer'
+      Description: Sharp image processing library
+      ContentUri: ./layers/sharp
+      CompatibleRuntimes:
+        - nodejs20.x
+      RetentionPolicy: Delete
+
+  # Step Functions State Machine
+  ProcessingStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub '${AWS::StackName}-processing'
+      Type: EXPRESS
+      Role: !GetAtt StepFunctionsExecutionRole.Arn
+      Tracing:
+        Enabled: true
+      Logging:
+        Level: !If [IsProduction, ERROR, ALL]
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      Definition:
+        Comment: Sequential image processing workflow
+        StartAt: ValidateInput
+        States:
+          ValidateInput:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: !GetAtt ValidatorFunction.Arn
+              Payload:
+                bucket.$: $.bucket
+                key.$: $.key
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                IntervalSeconds: 2
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            Next: ResizeImage
+            Catch:
+              - ErrorEquals:
+                  - ValidationError
+                Next: HandleError
+          ResizeImage:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: !GetAtt ResizeFunction.Arn
+              Payload:
+                bucket.$: $.bucket
+                key.$: $.key
+                width: 1920
+                height: 1080
+                maintainAspectRatio: true
+            ResultPath: $.resizeResult
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                IntervalSeconds: 5
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Next: AdjustExposure
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: HandleError
+                ResultPath: $.error
+          AdjustExposure:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: !GetAtt ExposureFunction.Arn
+              Payload:
+                bucket.$: $.bucket
+                key.$: $.resizeResult.Payload.outputKey
+                adjustment: 0.2
+            ResultPath: $.exposureResult
+            Retry:
+              - ErrorEquals:
+                  - States.TaskFailed
+                IntervalSeconds: 5
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Next: RecordSuccess
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                Next: HandleError
+                ResultPath: $.error
+          RecordSuccess:
+            Type: Pass
+            Parameters:
+              status: success
+              originalKey.$: $.key
+              processedFiles:
+                resized.$: $.resizeResult.Payload.outputKey
+                adjusted.$: $.exposureResult.Payload.outputKey
+              completedAt.$: $$.State.EnteredTime
+            End: true
+          HandleError:
+            Type: Pass
+            Parameters:
+              status: failed
+              originalKey.$: $.key
+              error.$: $.error
+              failedAt.$: $$.State.EnteredTime
+            End: true
+
+  # CloudWatch Log Groups
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/api-gateway/${AWS::StackName}'
+      RetentionInDays: !If [IsProduction, 30, 7]
+
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/states/${AWS::StackName}-processing'
+      RetentionInDays: !If [IsProduction, 30, 7]
+
+  # CloudWatch Alarms
+  HighErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-high-error-rate'
+      AlarmDescription: Triggers when Lambda error rate is high
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref OrchestratorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  HighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-high-latency'
+      AlarmDescription: Triggers when processing latency is high
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ResizeFunction
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 30000  # 30 seconds
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ThrottlingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-throttling'
+      AlarmDescription: Triggers when Lambda functions are throttled
+      MetricName: Throttles
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # CloudWatch Dashboard
+  MonitoringDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${AWS::StackName}-monitoring'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", {"stat": "Sum", "label": "Total Invocations"}],
+                  [".", "Errors", {"stat": "Sum", "label": "Total Errors"}],
+                  [".", "Duration", {"stat": "Average", "label": "Avg Duration"}]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Lambda Overview",
+                "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/States", "ExecutionsFailed", {"stat": "Sum"}],
+                  [".", "ExecutionsSucceeded", {"stat": "Sum"}],
+                  [".", "ExecutionTime", {"stat": "Average"}]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Step Functions",
+                "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/S3", "NumberOfObjects", {"stat": "Average", "dimensions": {"BucketName": "${FileStorageBucket}"}}],
+                  [".", "BucketSizeBytes", {"stat": "Average", "dimensions": {"BucketName": "${FileStorageBucket}", "StorageType": "StandardStorage"}}]
+                ],
+                "period": 86400,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "S3 Storage",
+                "view": "singleValue"
+              }
+            },
+            {
+              "type": "log",
+              "properties": {
+                "query": "SOURCE '/aws/lambda/${AWS::StackName}-orchestrator' | fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 20",
+                "region": "${AWS::Region}",
+                "title": "Recent Errors",
+                "queryLanguage": "kusto"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${FileProcessingApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'
+
+  BucketName:
+    Description: S3 bucket name for file storage
+    Value: !Ref FileStorageBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-BucketName'
+
+  StateMachineArn:
+    Description: Step Functions state machine ARN
+    Value: !Ref ProcessingStateMachine
+    Export:
+      Name: !Sub '${AWS::StackName}-StateMachineArn'

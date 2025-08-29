@@ -1,0 +1,26 @@
+{
+  "name": "file-flow",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serverless file processing platform",
+  "scripts": {
+    "preinstall": "npx only-allow pnpm",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "type-check": "pnpm -r type-check",
+    "dev": "pnpm -r --parallel dev",
+    "deploy:dev": "cd packages/backend && pnpm deploy:dev",
+    "deploy:staging": "cd packages/backend && pnpm deploy:staging",
+    "deploy:prod": "cd packages/backend && pnpm deploy:prod"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.3",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "packageManager": "pnpm@8.14.0"
+}

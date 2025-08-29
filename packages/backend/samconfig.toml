@@ -1,0 +1,41 @@
+version = 0.1
+
+[default]
+[default.global.parameters]
+stack_name = "file-flow-dev"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+resolve_s3 = true
+s3_prefix = "file-flow-dev"
+region = "us-east-1"
+parameter_overrides = "Environment=dev"
+
+[staging]
+[staging.global.parameters]
+stack_name = "file-flow-staging"
+
+[staging.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+s3_prefix = "file-flow-staging"
+region = "us-east-1"
+parameter_overrides = "Environment=staging"
+
+[prod]
+[prod.global.parameters]
+stack_name = "file-flow-prod"
+
+[prod.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+s3_prefix = "file-flow-prod"
+region = "us-east-1"
+parameter_overrides = "Environment=prod"
