@@ -3,6 +3,7 @@ import { S3Client } from '@aws-sdk/client-s3';
 import sharp from 'sharp';
 import { s3Service, streamToBuffer } from '../shared/s3-utils';
 import { logger } from '../shared/logger';
+import { config } from '../config';
 import { ExposureEvent, ExposureResult } from '../types';
 
 interface ExposureProcessor {
@@ -65,7 +66,7 @@ const exposureProcessor = (): ExposureProcessor => ({
 const exposureHandler = (
   s3: ReturnType<typeof s3Service>,
   processor: ExposureProcessor
-): Handler<ExposureEvent, ExposureResult> => async (event) => {
+) => async (event: ExposureEvent): Promise<ExposureResult> => {
   logger.info('Processing exposure adjustment', {
     bucket: event.bucket,
     key: event.key,
@@ -150,17 +151,16 @@ const exposureHandler = (
   }
 };
 
-// Lambda handler factory
-export const handler = (): Handler<ExposureEvent, ExposureResult> => {
-  const s3Client = new S3Client({
-    region: process.env.AWS_REGION || 'us-east-1',
-  });
-
+// Direct handler export with full dependency construction
+export const lambdaHandler: Handler<ExposureEvent, ExposureResult> = async (event): Promise<ExposureResult> => {
+  // Construct entire dependency graph here
+  const { awsRegion } = config();
+  
+  const s3Client = new S3Client({ region: awsRegion });
   const s3 = s3Service(s3Client);
   const processor = exposureProcessor();
-
-  return exposureHandler(s3, processor);
+  
+  // Call the actual handler logic directly
+  const handler = exposureHandler(s3, processor);
+  return handler(event);
 };
-
-// Export for Lambda
-export const lambdaHandler = handler();

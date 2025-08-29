@@ -7,21 +7,23 @@ import {
   S3Client,
   PutBucketNotificationConfigurationCommand,
   GetBucketNotificationConfigurationCommand,
+  FilterRuleName,
+  Event,
 } from '@aws-sdk/client-s3';
 import { logger } from '../shared/logger';
+import { config } from '../config';
 
-const s3Client = new S3Client({});
-
-/**
- * Custom resource handler for configuring S3 bucket notifications
- * This avoids circular dependencies in CloudFormation
- */
-export const lambdaHandler: CloudFormationCustomResourceHandler = async (
+const s3NotificationHandler = (
+  s3Client: S3Client
+) => async (
   event: CloudFormationCustomResourceEvent
 ): Promise<CloudFormationCustomResourceResponse> => {
+  const physicalResourceId = 
+    'PhysicalResourceId' in event ? event.PhysicalResourceId : 'S3NotificationConfig';
+    
   const response: CloudFormationCustomResourceResponse = {
     Status: 'SUCCESS',
-    PhysicalResourceId: event.PhysicalResourceId || 'S3NotificationConfig',
+    PhysicalResourceId: physicalResourceId,
     StackId: event.StackId,
     RequestId: event.RequestId,
     LogicalResourceId: event.LogicalResourceId,
@@ -73,12 +75,12 @@ export const lambdaHandler: CloudFormationCustomResourceHandler = async (
         {
           Id: 'ProcessUploads',
           LambdaFunctionArn,
-          Events: ['s3:ObjectCreated:*'],
+          Events: [Event.s3_ObjectCreated_],
           Filter: {
             Key: {
               FilterRules: [
                 {
-                  Name: 'prefix',
+                  Name: FilterRuleName.prefix,
                   Value: 'uploads/',
                 },
               ],
@@ -105,5 +107,42 @@ export const lambdaHandler: CloudFormationCustomResourceHandler = async (
       Status: 'FAILED',
       Reason: error instanceof Error ? error.message : 'Unknown error',
     };
+  }
+};
+
+/**
+ * Direct handler export with full dependency construction
+ * Custom resource handler for configuring S3 bucket notifications
+ * This avoids circular dependencies in CloudFormation
+ */
+export const lambdaHandler: CloudFormationCustomResourceHandler = async (event, context) => {
+  try {
+    // Construct entire dependency graph here
+    const { awsRegion } = config();
+    
+    const s3Client = new S3Client({ region: awsRegion });
+    
+    // Call the actual handler logic directly
+    const handler = s3NotificationHandler(s3Client);
+    const response = await handler(event);
+    
+    // CloudFormation custom resource requires callback
+    if (context.done) {
+      context.done(undefined, response);
+    }
+  } catch (error) {
+    const errorResponse = {
+      Status: 'FAILED' as const,
+      PhysicalResourceId: 'S3NotificationConfig',
+      StackId: event.StackId,
+      RequestId: event.RequestId,
+      LogicalResourceId: event.LogicalResourceId,
+      Data: {},
+      Reason: error instanceof Error ? error.message : 'Unknown error',
+    };
+    
+    if (context.done) {
+      context.done(undefined, errorResponse);
+    }
   }
 };

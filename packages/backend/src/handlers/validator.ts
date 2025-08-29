@@ -2,6 +2,7 @@ import { Handler } from 'aws-lambda';
 import { S3Client } from '@aws-sdk/client-s3';
 import { s3Service } from '../shared/s3-utils';
 import { logger } from '../shared/logger';
+import { config } from '../config';
 import {
   ValidationEvent,
   ValidationResult,
@@ -11,7 +12,7 @@ import {
 
 const validatorHandler = (
   s3: ReturnType<typeof s3Service>
-): Handler<ValidationEvent, ValidationResult> => async (event) => {
+) => async (event: ValidationEvent): Promise<ValidationResult> => {
   logger.info('Validating file', { 
     bucket: event.bucket, 
     key: event.key 
@@ -96,16 +97,15 @@ const validatorHandler = (
   }
 };
 
-// Lambda handler factory
-export const handler = (): Handler<ValidationEvent, ValidationResult> => {
-  const s3Client = new S3Client({
-    region: process.env.AWS_REGION || 'us-east-1',
-  });
-
+// Direct handler export with full dependency construction
+export const lambdaHandler: Handler<ValidationEvent, ValidationResult> = async (event): Promise<ValidationResult> => {
+  // Construct entire dependency graph here
+  const { awsRegion } = config();
+  
+  const s3Client = new S3Client({ region: awsRegion });
   const s3 = s3Service(s3Client);
-
-  return validatorHandler(s3);
+  
+  // Call the actual handler logic directly
+  const handler = validatorHandler(s3);
+  return handler(event);
 };
-
-// Export for Lambda
-export const lambdaHandler = handler();

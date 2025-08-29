@@ -2,6 +2,7 @@ import { APIGatewayProxyHandler, APIGatewayProxyResult } from 'aws-lambda';
 import { S3Client } from '@aws-sdk/client-s3';
 import { s3Service, generateFileKey, S3Service } from '../shared/s3-utils';
 import { logger } from '../shared/logger';
+import { config } from '../config';
 import {
   UploadRequest,
   UploadResponse,
@@ -13,7 +14,7 @@ import {
 const presignedUrlHandler = (
   bucket: string,
   s3: S3Service
-): APIGatewayProxyHandler => async (event): Promise<APIGatewayProxyResult> => {
+) => async (event: import('aws-lambda').APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
   try {
     logger.info('Presigned URL request received', {
       headers: event.headers,
@@ -110,21 +111,15 @@ const presignedUrlHandler = (
   }
 };
 
-// Lambda handler factory
-export const handler = (): APIGatewayProxyHandler => {
-  const bucket = process.env.BUCKET_NAME;
-  if (!bucket) {
-    throw new Error('BUCKET_NAME environment variable is required');
-  }
-
-  const s3Client = new S3Client({
-    region: process.env.AWS_REGION || 'us-east-1',
-  });
-
+// Direct handler export with full dependency construction
+export const lambdaHandler: APIGatewayProxyHandler = async (event): Promise<APIGatewayProxyResult> => {
+  // Construct entire dependency graph here
+  const { bucketName, awsRegion } = config();
+  
+  const s3Client = new S3Client({ region: awsRegion });
   const s3 = s3Service(s3Client);
-
-  return presignedUrlHandler(bucket, s3);
+  
+  // Call the actual handler logic directly
+  const handler = presignedUrlHandler(bucketName, s3);
+  return handler(event);
 };
-
-// Export for Lambda
-export const lambdaHandler = handler();

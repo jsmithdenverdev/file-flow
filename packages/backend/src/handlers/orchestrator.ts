@@ -2,6 +2,7 @@ import { S3Handler, S3EventRecord } from 'aws-lambda';
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { createHash } from 'crypto';
 import { logger } from '../shared/logger';
+import { config } from '../config';
 import { ProcessingInput } from '../types';
 
 const stepFunctionsService = (
@@ -72,7 +73,7 @@ const processS3Record = async (
 const orchestratorHandler = (
   stateMachineArn: string,
   sfnClient: SFNClient
-): S3Handler => async (event) => {
+) => async (event: import('aws-lambda').S3Event) => {
   const service = stepFunctionsService(sfnClient, stateMachineArn);
 
   logger.info('Processing S3 event', { 
@@ -96,19 +97,14 @@ const orchestratorHandler = (
   logger.info('Completed processing all S3 records');
 };
 
-// Lambda handler factory
-export const handler = (): S3Handler => {
-  const stateMachineArn = process.env.STATE_MACHINE_ARN;
-  if (!stateMachineArn) {
-    throw new Error('STATE_MACHINE_ARN environment variable is required');
-  }
-
-  const sfnClient = new SFNClient({
-    region: process.env.AWS_REGION || 'us-east-1',
-  });
-
-  return orchestratorHandler(stateMachineArn, sfnClient);
+// Direct handler export with full dependency construction
+export const lambdaHandler: S3Handler = async (event) => {
+  // Construct entire dependency graph here
+  const { stateMachineArn, awsRegion } = config();
+  
+  const sfnClient = new SFNClient({ region: awsRegion });
+  
+  // Call the actual handler logic directly
+  const handler = orchestratorHandler(stateMachineArn, sfnClient);
+  return handler(event);
 };
-
-// Export for Lambda
-export const lambdaHandler = handler();

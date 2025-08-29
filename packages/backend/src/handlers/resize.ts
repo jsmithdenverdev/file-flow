@@ -3,6 +3,7 @@ import { S3Client } from '@aws-sdk/client-s3';
 import sharp from 'sharp';
 import { s3Service, streamToBuffer } from '../shared/s3-utils';
 import { logger } from '../shared/logger';
+import { config } from '../config';
 import { ResizeEvent, ResizeResult } from '../types';
 
 interface ImageProcessor {
@@ -76,7 +77,7 @@ const imageProcessor = (): ImageProcessor => ({
 const resizeHandler = (
   s3: ReturnType<typeof s3Service>,
   processor: ImageProcessor
-): Handler<ResizeEvent, ResizeResult> => async (event) => {
+) => async (event: ResizeEvent): Promise<ResizeResult> => {
   logger.info('Processing resize request', {
     bucket: event.bucket,
     key: event.key,
@@ -157,17 +158,16 @@ const resizeHandler = (
   }
 };
 
-// Lambda handler factory
-export const handler = (): Handler<ResizeEvent, ResizeResult> => {
-  const s3Client = new S3Client({
-    region: process.env.AWS_REGION || 'us-east-1',
-  });
-
+// Direct handler export with full dependency construction
+export const lambdaHandler: Handler<ResizeEvent, ResizeResult> = async (event): Promise<ResizeResult> => {
+  // Construct entire dependency graph here
+  const { awsRegion } = config();
+  
+  const s3Client = new S3Client({ region: awsRegion });
   const s3 = s3Service(s3Client);
   const processor = imageProcessor();
-
-  return resizeHandler(s3, processor);
+  
+  // Call the actual handler logic directly
+  const handler = resizeHandler(s3, processor);
+  return handler(event);
 };
-
-// Export for Lambda
-export const lambdaHandler = handler();
