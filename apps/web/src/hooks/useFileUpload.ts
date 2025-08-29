@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { apiService } from '@/services/api';
+import { useApiService } from '@/context/ServiceContext';
 import { validateFile, generateFileId } from '@/utils/file';
 import type { FileItem, FileStatus } from '@/schemas';
 
@@ -12,6 +12,7 @@ interface UseFileUploadReturn {
 }
 
 export function useFileUpload(): UseFileUploadReturn {
+  const apiService = useApiService();
   const [files, setFiles] = useState<FileItem[]>([]);
   const [isUploading, setIsUploading] = useState(false);
 

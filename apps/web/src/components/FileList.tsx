@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import type { FileItem } from '@/schemas';
 import { formatFileSize, getStatusColor } from '@/utils/file';
-import { apiService } from '@/services/api';
+import { useApiService } from '@/context/ServiceContext';
 
 interface FileListProps {
   files: FileItem[];
@@ -42,6 +42,8 @@ const FileCard: React.FC<{
   file: FileItem; 
   onRemove: (id: string) => void; 
 }> = ({ file, onRemove }) => {
+  const apiService = useApiService();
+
   const handleDownload = async (key: string, filename: string) => {
     try {
       const url = await apiService.generateDownloadUrl(key);
