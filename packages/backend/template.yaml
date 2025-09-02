@@ -272,6 +272,17 @@ Resources:
       Environment:
         Variables:
           STATE_MACHINE_ARN: !Ref ProcessingStateMachine
+      Events:
+        S3UploadEvent:
+          Type: S3
+          Properties:
+            Bucket: !Ref FileStorageBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: uploads/
 
   # Orchestrator Lambda Role (needs Step Functions permissions)
   OrchestratorRole:
@@ -306,44 +317,6 @@ Resources:
                   - sqs:GetQueueAttributes
                 Resource: !GetAtt OrchestratorDLQ.Arn
 
-  # S3 Permission for Orchestrator Lambda
-  OrchestratorS3Permission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt OrchestratorFunction.Arn
-      Action: lambda:InvokeFunction
-      Principal: s3.amazonaws.com
-      SourceAccount: !Ref AWS::AccountId
-      SourceArn: !GetAtt FileStorageBucket.Arn
-
-  # S3 Bucket Notification Configuration (separate resource to avoid circular dependency)
-  BucketNotificationConfiguration:
-    Type: AWS::CloudFormation::CustomResource
-    DependsOn:
-      - OrchestratorS3Permission
-    Properties:
-      ServiceToken: !GetAtt S3NotificationFunction.Arn
-      BucketName: !Ref FileStorageBucket
-      LambdaFunctionArn: !GetAtt OrchestratorFunction.Arn
-
-  # Custom resource Lambda for S3 notifications
-  S3NotificationFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub '${AWS::StackName}-s3-notification-config'
-      CodeUri: ./dist
-      Handler: s3-notification-config.lambdaHandler
-      Runtime: nodejs20.x
-      MemorySize: 256
-      Timeout: 60
-      Policies:
-        - Version: '2012-10-17'
-          Statement:
-            - Effect: Allow
-              Action:
-                - s3:GetBucketNotification
-                - s3:PutBucketNotification
-              Resource: !GetAtt FileStorageBucket.Arn
 
   # Validator Lambda Function
   ValidatorFunction:

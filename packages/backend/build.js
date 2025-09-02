@@ -9,7 +9,6 @@ const entryPoints = [
   'src/handlers/validator.ts',
   'src/handlers/resize.ts',
   'src/handlers/exposure.ts',
-  'src/handlers/s3-notification-config.ts',
 ];
 
 const build = async () => {
