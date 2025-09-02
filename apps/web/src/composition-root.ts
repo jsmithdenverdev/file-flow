@@ -1,5 +1,5 @@
-import { config, isDebugEnabled } from '@/config';
-import { apiService, type ApiService } from '@/services/api';
+import { isDebugEnabled, type AppConfig } from "@/config";
+import { apiService, type ApiService } from "@/services/api";
 
 // Define the services available throughout the application
 export interface Services {
@@ -14,9 +14,9 @@ interface Logger {
   error: (message: string, ...args: unknown[]) => void;
 }
 
-const logger = (): Logger => {
-  const debugEnabled = isDebugEnabled();
-  
+const logger = (config: AppConfig): Logger => {
+  const debugEnabled = isDebugEnabled(config);
+
   return {
     debug: (message: string, ...args: unknown[]) => {
       if (debugEnabled) {
@@ -36,26 +36,19 @@ const logger = (): Logger => {
 };
 
 // Create all services with their dependencies
-const createServices = (): Services => {
-  const loggerService = logger();
-  
-  loggerService.debug('Initializing services with configuration:', config);
+const createServices = ({ config }: { config: AppConfig }): Services => {
+  const loggerService = logger(config);
+
+  loggerService.debug("Initializing services with configuration:", config);
 
   // Create API service with configuration dependency
   const api = apiService({ config });
 
-  loggerService.info('All services initialized successfully');
+  loggerService.info("All services initialized successfully");
 
   return {
     apiService: api,
   };
 };
 
-// Export the single instance of services (singleton pattern)
-export const services = createServices();
-
-// Export individual services for convenience
-export const { apiService: api } = services;
-
-// Export for testing purposes
 export { createServices };

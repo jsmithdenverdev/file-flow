@@ -1,6 +1,6 @@
 # Frontend Development Standards
 
-This document captures the comprehensive frontend development standards, patterns, and practices derived from the Project Lite codebase. Use these guidelines to maintain consistency across frontend projects.
+This document captures the comprehensive frontend development standards, patterns, and practices for the FileFlow web application. These guidelines ensure consistency, maintainability, and proper dependency injection patterns.
 
 ## Project Setup and Build Tools
 
@@ -31,6 +31,98 @@ This document captures the comprehensive frontend development standards, pattern
 - ESNext module system
 - Bundler mode module resolution
 - React 19+ with automatic JSX runtime
+
+## Core Architecture Principles
+
+### Dependency Injection Pattern
+**CRITICAL: NO GLOBAL DEPENDENCIES**
+- **All dependencies must be passed as arguments** - never use globals
+- **Functions return closures** that capture their dependencies
+- **Named after their return type**, not prefixed with "create"
+- **Configuration flows through composition root** to all services
+
+#### Example: Service Creation Pattern
+```typescript
+// ✅ GOOD: Function named after its return type, dependencies as arguments
+const apiService = (dependencies: ApiServiceDependencies): ApiService => {
+  const { config } = dependencies;
+  
+  return {
+    async getPresignedUrl(request: UploadRequest): Promise<UploadResponse> {
+      // Implementation using config from closure
+      return fetchWithValidation(
+        `${config.api.baseUrl}/upload/presign`,
+        { method: 'POST' },
+        UploadResponseSchema
+      );
+    }
+  };
+};
+
+// ❌ BAD: Using global configuration
+const apiService = (): ApiService => {
+  const config = globalConfig; // NO! Never access globals
+  // ...
+};
+
+// ❌ BAD: Prefixing with "create"
+const createApiService = (config: Config): ApiService => {
+  // ...
+};
+```
+
+### Composition Root Pattern
+```typescript
+// composition-root.ts
+interface Services {
+  apiService: ApiService;
+  authService: AuthService;
+  // All application services
+}
+
+// Dependencies flow from main entry point
+const createServices = ({ config }: { config: AppConfig }): Services => {
+  const loggerService = logger(config);
+  const api = apiService({ config });
+  const auth = authService({ api, config });
+  
+  return {
+    apiService: api,
+    authService: auth,
+  };
+};
+
+// main.tsx - Single configuration point
+const config = createAppConfig(parseEnvironment());
+const services = createServices({ config });
+
+<ServiceProvider services={services}>
+  <App />
+</ServiceProvider>
+```
+
+### Configuration Management
+```typescript
+// All configuration comes from validated environment
+const parseEnvironment = (): Environment => {
+  const env = {
+    API_BASE_URL: import.meta.env.VITE_API_BASE_URL,
+    S3_BUCKET_NAME: import.meta.env.VITE_S3_BUCKET_NAME,
+  };
+  
+  return EnvironmentSchema.parse(env);
+};
+
+// Transform to app config structure
+const createAppConfig = (env: Environment): AppConfig => ({
+  api: { baseUrl: env.API_BASE_URL },
+  aws: { bucketName: env.S3_BUCKET_NAME },
+});
+
+// Helper functions take config as argument
+export const isDevelopment = (config: AppConfig) =>
+  config.app.nodeEnv === "development";
+```
 
 ## TypeScript Configuration
 
@@ -113,17 +205,50 @@ import { utilityFunction } from "./utils";
 - **Custom hooks** for reusable stateful logic
 - **Context API** for cross-component state when needed
 - **No external state management libraries** unless absolutely necessary
+- **Services injected via Context**, not imported globally
 
-#### Custom Hook Pattern
+#### Service Context Pattern
 ```typescript
-export function useLocalStorage() {
-  const saveToStorage = useCallback((data: Data): void => {
+// context/ServiceContext.tsx
+const ServiceContext = createContext<Services | null>(null);
+
+export const ServiceProvider: React.FC<{ services: Services; children: ReactNode }> = ({ 
+  services, 
+  children 
+}) => {
+  return (
+    <ServiceContext.Provider value={services}>
+      {children}
+    </ServiceContext.Provider>
+  );
+};
+
+export const useServices = (): Services => {
+  const services = useContext(ServiceContext);
+  if (!services) {
+    throw new Error('useServices must be used within ServiceProvider');
+  }
+  return services;
+};
+
+// Usage in components
+const MyComponent: React.FC = () => {
+  const { apiService } = useServices();
+  // Use injected service, not global import
+};
+```
+
+#### Custom Hook Pattern with Dependencies
+```typescript
+// Hooks receive dependencies as arguments
+export function useLocalStorage(key: string, defaultValue: unknown) {
+  const saveToStorage = useCallback((data: unknown): void => {
     try {
-      localStorage.setItem(KEY, JSON.stringify(data));
+      localStorage.setItem(key, JSON.stringify(data));
     } catch (error) {
       console.warn('Failed to save:', error);
     }
-  }, []);
+  }, [key]);
 
   return { saveToStorage };
 }
@@ -289,11 +414,41 @@ src/
   hooks/           # Custom React hooks
   pages/           # Page-level components
   schemas/         # Zod schemas and types
-  services/        # External service integrations
+  services/        # Service functions (return closures)
+  config/          # Configuration and environment parsing
   utils/           # Utility functions
+  composition-root.ts # Dependency injection setup
   App.tsx         # Root application component
   main.tsx        # Application entry point
   index.css       # Global styles with Tailwind
+```
+
+### Service Architecture
+```typescript
+// services/api.ts - Service with dependencies
+interface ApiServiceDependencies {
+  config: AppConfig;
+}
+
+export interface ApiService {
+  getPresignedUrl(request: UploadRequest): Promise<UploadResponse>;
+  uploadFile(file: File, url: string): Promise<void>;
+}
+
+// Function named after return type, not createApiService
+export const apiService = (deps: ApiServiceDependencies): ApiService => {
+  const { config } = deps;
+  
+  return {
+    async getPresignedUrl(request) {
+      // Use config from closure
+      return fetch(`${config.api.baseUrl}/upload`);
+    },
+    async uploadFile(file, url) {
+      // Implementation
+    }
+  };
+};
 ```
 
 ### Export Patterns
@@ -430,11 +585,43 @@ const isValid = value.trim().length > 0;
 - Use optional chaining (`?.`) and nullish coalescing (`??`)
 
 ## Testing Philosophy
-While not explicitly shown in the codebase, follow these principles:
+
+### Testing with Dependency Injection
+```typescript
+// Easy to test with injected dependencies
+describe('apiService', () => {
+  it('should call correct endpoint', async () => {
+    const mockConfig: AppConfig = {
+      api: { baseUrl: 'http://test.com' },
+      aws: { bucketName: 'test-bucket', region: 'us-east-1' }
+    };
+    
+    const service = apiService({ config: mockConfig });
+    // Test with controlled dependencies
+  });
+});
+
+// Component testing with mocked services
+const mockServices: Services = {
+  apiService: {
+    getPresignedUrl: jest.fn(),
+    uploadFile: jest.fn(),
+  }
+};
+
+render(
+  <ServiceProvider services={mockServices}>
+    <ComponentUnderTest />
+  </ServiceProvider>
+);
+```
+
+### Testing Principles
 - Test user behavior, not implementation details
 - Focus on integration tests over unit tests
 - Use React Testing Library for component tests
-- Mock external dependencies at the service boundary
+- Mock services at the composition root level
+- Never mock global imports
 
 ## Performance Best Practices
 
@@ -538,86 +725,142 @@ When applying these standards to existing projects:
 
 ```typescript
 import React, { useState, useMemo, useCallback } from 'react';
-import { Save, X } from 'lucide-react';
-import { WorkItemSchema, type WorkItem } from '../schemas';
-import { buildHierarchy, getStatusColor } from '../utils';
+import { Save, X, Upload } from 'lucide-react';
+import { useServices } from '@/context/ServiceContext';
+import { UploadRequestSchema, type UploadRequest } from '@/schemas';
 
-interface WorkItemCardProps {
-  item: WorkItem;
-  onSave: (item: WorkItem) => void;
+interface FileUploadCardProps {
+  onUploadComplete: (key: string) => void;
   onCancel: () => void;
 }
 
-export const WorkItemCard: React.FC<WorkItemCardProps> = ({ 
-  item, 
-  onSave, 
+export const FileUploadCard: React.FC<FileUploadCardProps> = ({ 
+  onUploadComplete, 
   onCancel 
 }) => {
-  const [editedItem, setEditedItem] = useState(item);
+  const { apiService } = useServices(); // Injected service
+  const [file, setFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(0);
   
   const isValid = useMemo(() => {
-    const result = WorkItemSchema.safeParse(editedItem);
-    return result.success;
-  }, [editedItem]);
+    if (!file) return false;
+    const request: UploadRequest = {
+      filename: file.name,
+      contentType: file.type,
+      fileSize: file.size
+    };
+    return UploadRequestSchema.safeParse(request).success;
+  }, [file]);
   
-  const handleSave = useCallback(() => {
-    if (isValid) {
-      onSave(editedItem);
+  const handleUpload = useCallback(async () => {
+    if (!file || !isValid) return;
+    
+    try {
+      setUploading(true);
+      
+      // Use injected service, not global import
+      const response = await apiService.getPresignedUrl({
+        filename: file.name,
+        contentType: file.type,
+        fileSize: file.size
+      });
+      
+      await apiService.uploadFile(
+        file, 
+        response.uploadUrl,
+        (progress) => setProgress(progress)
+      );
+      
+      onUploadComplete(response.key);
+    } catch (error) {
+      console.error('Upload failed:', error);
+    } finally {
+      setUploading(false);
     }
-  }, [editedItem, isValid, onSave]);
+  }, [file, isValid, apiService, onUploadComplete]);
   
-  const handleFieldChange = useCallback((
-    field: keyof WorkItem, 
-    value: WorkItem[keyof WorkItem]
-  ) => {
-    setEditedItem(prev => ({ ...prev, [field]: value }));
+  const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0];
+    if (selectedFile) {
+      setFile(selectedFile);
+      setProgress(0);
+    }
   }, []);
   
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow-sm">
       <div className="flex items-center justify-between mb-4">
         <input
-          type="text"
-          value={editedItem.title}
-          onChange={(e) => handleFieldChange('title', e.target.value)}
-          className="flex-1 p-2 border border-gray-300 dark:border-gray-600 rounded"
+          type="file"
+          onChange={handleFileChange}
+          disabled={uploading}
+          className="flex-1"
+          accept="image/jpeg,image/png,image/webp"
         />
         <div className="flex items-center space-x-2 ml-4">
           <button
-            onClick={handleSave}
-            disabled={!isValid}
-            className="p-2 text-green-600 hover:text-green-700 disabled:opacity-50"
-            title="Save changes"
+            onClick={handleUpload}
+            disabled={!isValid || uploading}
+            className="p-2 text-blue-600 hover:text-blue-700 disabled:opacity-50"
+            title="Upload file"
           >
-            <Save className="w-4 h-4" />
+            <Upload className="w-4 h-4" />
           </button>
           <button
             onClick={onCancel}
-            className="p-2 text-red-600 hover:text-red-700"
+            disabled={uploading}
+            className="p-2 text-red-600 hover:text-red-700 disabled:opacity-50"
             title="Cancel"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
       </div>
-      <div className={`inline-block px-2 py-1 rounded text-xs ${getStatusColor(editedItem.status)}`}>
-        {editedItem.status}
-      </div>
+      {uploading && (
+        <div className="w-full bg-gray-200 rounded-full h-2">
+          <div 
+            className="bg-blue-600 h-2 rounded-full transition-all"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      )}
     </div>
   );
 };
 
-export default WorkItemCard;
+export default FileUploadCard;
+```
+
+## Key Principles Summary
+
+### Must-Follow Rules
+1. **NO GLOBALS** - All dependencies passed as arguments
+2. **Functions named after return type** - `apiService`, not `createApiService`
+3. **Composition root pattern** - Single point for dependency injection
+4. **Services via Context** - Never import services directly in components
+5. **Configuration flows down** - From main.tsx through composition root to all services
+
+### Architecture Flow
+```
+main.tsx
+  ↓ (parseEnvironment + createAppConfig)
+composition-root.ts
+  ↓ (createServices with config)
+ServiceProvider
+  ↓ (Context injection)
+Components (useServices hook)
 ```
 
 ## Conclusion
 
-These standards represent battle-tested patterns for building maintainable, performant, and user-friendly React applications. They emphasize:
+These standards ensure a maintainable, testable, and scalable React application through:
 
+- **Explicit dependency injection** - No hidden dependencies or globals
 - **Type safety** through TypeScript and Zod
+- **Testability** through injected dependencies
 - **Performance** through proper React patterns
 - **Consistency** through established conventions
-- **Maintainability** through clear organization
-- **User experience** through responsive design and error handling
+- **Maintainability** through clear dependency flow
 
-Apply these standards consistently to create robust frontend applications that scale well and remain maintainable over time.
+The dependency injection pattern is **non-negotiable** - it enables proper testing, clear architecture boundaries, and maintainable code that can evolve without tight coupling.
