@@ -1,7 +1,6 @@
 import { Handler } from 'aws-lambda';
-import { S3Client } from '@aws-sdk/client-s3';
-import { s3Service } from '../shared/s3-utils';
-import { logger } from '../shared/logger';
+import { S3Client, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { logger } from '../logging';
 import { config } from '../config';
 import {
   ValidationEvent,
@@ -11,7 +10,7 @@ import {
 } from '../types';
 
 const validatorHandler = (
-  s3: ReturnType<typeof s3Service>
+  s3Client: Pick<S3Client, 'send'>
 ) => async (event: ValidationEvent): Promise<ValidationResult> => {
   logger.info('Validating file', { 
     bucket: event.bucket, 
@@ -20,7 +19,16 @@ const validatorHandler = (
 
   try {
     // Check if object exists and get metadata
-    const metadata = await s3.headObject(event.bucket, event.key);
+    const command = new HeadObjectCommand({
+      Bucket: event.bucket,
+      Key: event.key,
+    });
+    const response: any = await s3Client.send(command);
+    const metadata = {
+      ContentType: response.ContentType,
+      ContentLength: response.ContentLength,
+      Metadata: response.Metadata,
+    };
 
     if (!metadata.ContentType) {
       logger.warn('File has no content type', { key: event.key });
@@ -103,9 +111,8 @@ export const lambdaHandler: Handler<ValidationEvent, ValidationResult> = async (
   const { awsRegion } = config();
   
   const s3Client = new S3Client({ region: awsRegion });
-  const s3 = s3Service(s3Client);
   
   // Call the actual handler logic directly
-  const handler = validatorHandler(s3);
+  const handler = validatorHandler(s3Client);
   return handler(event);
 };

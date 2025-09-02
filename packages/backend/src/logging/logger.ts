@@ -1,8 +1,4 @@
-type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
-
-interface LogContext {
-  [key: string]: any;
-}
+import { LogLevel, LogContext } from './types';
 
 class Logger {
   private readonly logLevel: LogLevel;

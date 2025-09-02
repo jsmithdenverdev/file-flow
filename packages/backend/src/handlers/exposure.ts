@@ -1,8 +1,9 @@
 import { Handler } from 'aws-lambda';
-import { S3Client } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import sharp from 'sharp';
-import { s3Service, streamToBuffer } from '../shared/s3-utils';
-import { logger } from '../shared/logger';
+import { streamToBuffer } from '../aws/s3';
+import { Readable } from 'stream';
+import { logger } from '../logging';
 import { config } from '../config';
 import { ExposureEvent, ExposureResult } from '../types';
 
@@ -64,7 +65,7 @@ const exposureProcessor = (): ExposureProcessor => ({
 });
 
 const exposureHandler = (
-  s3: ReturnType<typeof s3Service>,
+  s3Client: Pick<S3Client, 'send'>,
   processor: ExposureProcessor
 ) => async (event: ExposureEvent): Promise<ExposureResult> => {
   logger.info('Processing exposure adjustment', {
@@ -75,16 +76,18 @@ const exposureHandler = (
 
   try {
     // Download image
-    const { Body, ContentType, Metadata } = await s3.getObject(
-      event.bucket,
-      event.key
-    );
+    const getCommand = new GetObjectCommand({
+      Bucket: event.bucket,
+      Key: event.key,
+    });
+    const response: any = await s3Client.send(getCommand);
+    const { Body, ContentType, Metadata } = response;
 
     if (!Body) {
       throw new Error(`No body returned for ${event.key}`);
     }
 
-    const inputBuffer = await streamToBuffer(Body);
+    const inputBuffer = await streamToBuffer(Body as Readable);
     logger.info('Downloaded image for exposure adjustment', {
       key: event.key,
       size: inputBuffer.length,
@@ -115,19 +118,20 @@ const exposureHandler = (
     const outputMetadata = await sharp(outputBuffer).metadata();
 
     // Upload processed image
-    await s3.putObject(
-      event.bucket,
-      outputKey,
-      outputBuffer,
-      ContentType || 'image/jpeg',
-      {
+    const putCommand = new PutObjectCommand({
+      Bucket: event.bucket,
+      Key: outputKey,
+      Body: outputBuffer,
+      ContentType: ContentType || 'image/jpeg',
+      Metadata: {
         ...Metadata,
         'processing-step': 'exposure-adjustment',
         'adjustment-value': event.adjustment.toString(),
         'dimensions': `${outputMetadata.width}x${outputMetadata.height}`,
         'processed-at': new Date().toISOString(),
-      }
-    );
+      },
+    });
+    await s3Client.send(putCommand);
 
     logger.info('Uploaded exposure-adjusted image', {
       outputKey,
@@ -157,10 +161,9 @@ export const lambdaHandler: Handler<ExposureEvent, ExposureResult> = async (even
   const { awsRegion } = config();
   
   const s3Client = new S3Client({ region: awsRegion });
-  const s3 = s3Service(s3Client);
   const processor = exposureProcessor();
   
   // Call the actual handler logic directly
-  const handler = exposureHandler(s3, processor);
+  const handler = exposureHandler(s3Client, processor);
   return handler(event);
 };

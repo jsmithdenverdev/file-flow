@@ -1,23 +1,25 @@
 import { Context } from 'aws-lambda';
-import { handler } from '../../src/handlers/validator';
+import { lambdaHandler } from '../../src/handlers/validator';
 import { ValidationEvent } from '../../src/types';
 
-// Mock S3 service
-const mockHeadObject = jest.fn();
-jest.mock('../../src/shared/s3-utils', () => ({
-  s3Service: jest.fn(() => ({
-    headObject: mockHeadObject,
+// Mock AWS SDK
+const mockSend = jest.fn();
+jest.mock('@aws-sdk/client-s3', () => ({
+  S3Client: jest.fn(() => ({
+    send: mockSend,
   })),
+  HeadObjectCommand: jest.fn(),
 }));
 
 describe('Validator Lambda Handler', () => {
-  let lambdaHandler: ReturnType<typeof handler>;
   const mockContext = {} as Context;
   const mockCallback = jest.fn();
 
   beforeEach(() => {
     jest.clearAllMocks();
-    lambdaHandler = handler();
+    process.env.AWS_REGION = 'us-east-1';
+    process.env.BUCKET_NAME = 'test-bucket';
+    process.env.STATE_MACHINE_ARN = 'arn:aws:states:us-east-1:123456789:stateMachine:test';
   });
 
   it('should validate a valid image file', async () => {
@@ -26,13 +28,13 @@ describe('Validator Lambda Handler', () => {
       key: 'uploads/test-image.jpg',
     };
 
-    mockHeadObject.mockResolvedValue({
+    mockSend.mockResolvedValue({
       ContentType: 'image/jpeg',
       ContentLength: 1024 * 1024, // 1MB
       Metadata: {},
     });
 
-    const result = await lambdaHandler(event, mockContext, mockCallback);
+    const result = await lambdaHandler(event, mockContext, mockCallback) as any;
 
     expect(result.isValid).toBe(true);
     expect(result.contentType).toBe('image/jpeg');
@@ -46,12 +48,12 @@ describe('Validator Lambda Handler', () => {
       key: 'uploads/test-file',
     };
 
-    mockHeadObject.mockResolvedValue({
+    mockSend.mockResolvedValue({
       ContentLength: 1024,
       Metadata: {},
     });
 
-    const result = await lambdaHandler(event, mockContext, mockCallback);
+    const result = await lambdaHandler(event, mockContext, mockCallback) as any;
 
     expect(result.isValid).toBe(false);
     expect(result.error).toBe('File has no content type');
@@ -63,13 +65,13 @@ describe('Validator Lambda Handler', () => {
       key: 'uploads/document.pdf',
     };
 
-    mockHeadObject.mockResolvedValue({
+    mockSend.mockResolvedValue({
       ContentType: 'application/pdf',
       ContentLength: 1024,
       Metadata: {},
     });
 
-    const result = await lambdaHandler(event, mockContext, mockCallback);
+    const result = await lambdaHandler(event, mockContext, mockCallback) as any;
 
     expect(result.isValid).toBe(false);
     expect(result.error).toContain('Invalid content type');
@@ -81,13 +83,13 @@ describe('Validator Lambda Handler', () => {
       key: 'uploads/huge-image.jpg',
     };
 
-    mockHeadObject.mockResolvedValue({
+    mockSend.mockResolvedValue({
       ContentType: 'image/jpeg',
       ContentLength: 30 * 1024 * 1024, // 30MB
       Metadata: {},
     });
 
-    const result = await lambdaHandler(event, mockContext, mockCallback);
+    const result = await lambdaHandler(event, mockContext, mockCallback) as any;
 
     expect(result.isValid).toBe(false);
     expect(result.error).toContain('exceeds maximum');
@@ -101,9 +103,9 @@ describe('Validator Lambda Handler', () => {
 
     const error = new Error('NoSuchKey');
     error.name = 'NoSuchKey';
-    mockHeadObject.mockRejectedValue(error);
+    mockSend.mockRejectedValue(error);
 
-    const result = await lambdaHandler(event, mockContext, mockCallback);
+    const result = await lambdaHandler(event, mockContext, mockCallback) as any;
 
     expect(result.isValid).toBe(false);
     expect(result.error).toBe('File not found');
@@ -115,7 +117,7 @@ describe('Validator Lambda Handler', () => {
       key: 'uploads/test.jpg',
     };
 
-    mockHeadObject.mockRejectedValue(new Error('Network error'));
+    mockSend.mockRejectedValue(new Error('Network error'));
 
     await expect(lambdaHandler(event, mockContext, mockCallback))
       .rejects
@@ -130,7 +132,7 @@ describe('Validator Lambda Handler', () => {
     ];
 
     for (const contentType of imageTypes) {
-      mockHeadObject.mockResolvedValue({
+      mockSend.mockResolvedValue({
         ContentType: contentType,
         ContentLength: 1024,
         Metadata: {},
@@ -141,7 +143,7 @@ describe('Validator Lambda Handler', () => {
         key: `uploads/test.${contentType.split('/')[1]}`,
       };
 
-      const result = await lambdaHandler(event, mockContext, mockCallback);
+      const result = await lambdaHandler(event, mockContext, mockCallback) as any;
       expect(result.isValid).toBe(true);
       expect(result.contentType).toBe(contentType);
     }

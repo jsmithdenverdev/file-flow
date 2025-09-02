@@ -1,5 +1,5 @@
 import { APIGatewayProxyEvent, Context } from 'aws-lambda';
-import { handler } from '../../src/handlers/presigned-url';
+import { lambdaHandler } from '../../src/handlers/presigned-url';
 
 // Mock AWS SDK
 jest.mock('@aws-sdk/client-s3');
@@ -8,14 +8,14 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({
 }));
 
 describe('Presigned URL Lambda Handler', () => {
-  let lambdaHandler: ReturnType<typeof handler>;
   const mockContext = {} as Context;
   const mockCallback = jest.fn();
 
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.BUCKET_NAME = 'test-bucket';
-    lambdaHandler = handler();
+    process.env.AWS_REGION = 'us-east-1';
+    process.env.STATE_MACHINE_ARN = 'arn:aws:states:us-east-1:123456789:stateMachine:test';
   });
 
   const createMockEvent = (body: object): APIGatewayProxyEvent => ({
@@ -40,7 +40,7 @@ describe('Presigned URL Lambda Handler', () => {
       fileSize: 1024 * 1024, // 1MB
     });
 
-    const result = await lambdaHandler(event, mockContext, mockCallback);
+    const result = await lambdaHandler(event, mockContext, mockCallback) as any;
 
     expect(result.statusCode).toBe(200);
     const body = JSON.parse(result.body);
@@ -56,7 +56,7 @@ describe('Presigned URL Lambda Handler', () => {
       // Missing contentType and fileSize
     });
 
-    const result = await lambdaHandler(event, mockContext, mockCallback);
+    const result = await lambdaHandler(event, mockContext, mockCallback) as any;
 
     expect(result.statusCode).toBe(400);
     const body = JSON.parse(result.body);
@@ -70,7 +70,7 @@ describe('Presigned URL Lambda Handler', () => {
       fileSize: 1024,
     });
 
-    const result = await lambdaHandler(event, mockContext, mockCallback);
+    const result = await lambdaHandler(event, mockContext, mockCallback) as any;
 
     expect(result.statusCode).toBe(400);
     const body = JSON.parse(result.body);
@@ -84,7 +84,7 @@ describe('Presigned URL Lambda Handler', () => {
       fileSize: 30 * 1024 * 1024, // 30MB
     });
 
-    const result = await lambdaHandler(event, mockContext, mockCallback);
+    const result = await lambdaHandler(event, mockContext, mockCallback) as any;
 
     expect(result.statusCode).toBe(400);
     const body = JSON.parse(result.body);
@@ -95,7 +95,7 @@ describe('Presigned URL Lambda Handler', () => {
     const event = createMockEvent({} as any);
     event.body = 'invalid json';
 
-    const result = await lambdaHandler(event, mockContext, mockCallback);
+    const result = await lambdaHandler(event, mockContext, mockCallback) as any;
 
     expect(result.statusCode).toBe(500);
     const body = JSON.parse(result.body);
@@ -112,7 +112,7 @@ describe('Presigned URL Lambda Handler', () => {
         fileSize: 1024,
       });
 
-      const result = await lambdaHandler(event, mockContext, mockCallback);
+      const result = await lambdaHandler(event, mockContext, mockCallback) as any;
       expect(result.statusCode).toBe(200);
     }
   });

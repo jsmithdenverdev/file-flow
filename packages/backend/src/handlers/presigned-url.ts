@@ -1,7 +1,8 @@
 import { APIGatewayProxyHandler, APIGatewayProxyResult } from 'aws-lambda';
-import { S3Client } from '@aws-sdk/client-s3';
-import { s3Service, generateFileKey, S3Service } from '../shared/s3-utils';
-import { logger } from '../shared/logger';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { generateFileKey } from '../aws/s3';
+import { logger } from '../logging';
 import { config } from '../config';
 import {
   UploadRequest,
@@ -13,7 +14,7 @@ import {
 
 const presignedUrlHandler = (
   bucket: string,
-  s3: S3Service
+  s3Client: Pick<S3Client, 'send'>
 ) => async (event: import('aws-lambda').APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
   try {
     logger.info('Presigned URL request received', {
@@ -70,14 +71,21 @@ const presignedUrlHandler = (
     // Generate unique key for the file
     const key = generateFileKey(body.filename);
 
-    // Generate presigned URL
-    const uploadUrl = await s3.getPresignedUrl(
-      bucket,
-      key,
-      body.contentType,
-      body.fileSize,
-      3600 // 1 hour expiration
-    );
+    // Generate presigned URL using AWS SDK directly
+    const command = new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      ContentType: body.contentType,
+      ContentLength: body.fileSize,
+      Metadata: {
+        'original-filename': body.filename,
+        'upload-timestamp': new Date().toISOString(),
+      },
+    });
+    
+    const uploadUrl = await getSignedUrl(s3Client as S3Client, command, {
+      expiresIn: 3600, // 1 hour expiration
+    });
 
     const response: UploadResponse = {
       uploadUrl,
@@ -117,9 +125,8 @@ export const lambdaHandler: APIGatewayProxyHandler = async (event): Promise<APIG
   const { bucketName, awsRegion } = config();
   
   const s3Client = new S3Client({ region: awsRegion });
-  const s3 = s3Service(s3Client);
   
   // Call the actual handler logic directly
-  const handler = presignedUrlHandler(bucketName, s3);
+  const handler = presignedUrlHandler(bucketName, s3Client);
   return handler(event);
 };

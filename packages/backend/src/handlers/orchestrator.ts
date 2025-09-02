@@ -1,7 +1,7 @@
 import { S3Handler, S3EventRecord } from 'aws-lambda';
 import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { createHash } from 'crypto';
-import { logger } from '../shared/logger';
+import { logger } from '../logging';
 import { config } from '../config';
 import { ProcessingInput } from '../types';
 
